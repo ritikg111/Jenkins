@@ -1,0 +1,104 @@
+pipeline{
+    agent any
+    tools{
+
+        maven 'MAVEN3'
+
+    }
+    environment{
+        AWScreds = 'ecr:us-east-1:aws-accesskey'
+        RegistryName = '961555258557.dkr.ecr.us-east-1.amazonaws.com/vprofile-app'
+        RegistryURL= 'https://961555258557.dkr.ecr.us-east-1.amazonaws.com/vprofile-app'
+        clustername = 'vprofile-cluster'
+        servicename = 'vproapp-svc'
+
+    }
+    stages{
+        stage('Fetch Source Code'){
+            steps{
+
+                git url: 'https://github.com/ritikg111/cicd-kubernetes.git' , branch: 'main'
+
+            }
+        }
+        stage('Build Artifact'){
+            steps{
+                sh 'mvn clean install -DskipTests'
+        }
+        post{
+            success{
+                echo 'Archiving Artifact'
+                archiveArtifacts artifacts: '**/*.war'
+            }
+        }
+        }
+        stage('Unit Test'){
+            steps{
+                sh 'mvn test'
+            }
+        }
+        stage('Checkstyle Analysis'){
+            steps{
+                sh 'mvn checkstyle:checkstyle'
+            }
+        }
+        stage('Sonar-scanner Code Analysis'){
+
+                environment{
+                    scanner = tool 'sonar4.7'
+                }
+        steps{
+                withSonarQubeEnv('sonar-pro'){
+                    sh '''${scanner}/bin/sonar-scanner -Dsonar.projectKey=vprofile \
+                           -Dsonar.projectName=vprofile-repo \
+                           -Dsonar.projectVersion=1.0 \
+                           -Dsonar.sources=src/ \
+                           -Dsonar.java.binaries=target/test-classes/com/visualpathit/account/controllerTest/ \
+                           -Dsonar.junit.reportsPath=target/surefire-reports/ \
+                           -Dsonar.jacoco.reportsPath=target/jacoco.exec \
+                           -Dsonar.java.checkstyle.reportPaths=target/checkstyle-result.xml'''
+
+                }
+            }
+        }
+        stage('Quality Gate'){
+            steps{
+                timeout(time: 5, unit: 'MINUTES') {
+                waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Docker Image Build'){
+            steps{
+                script{
+                    dockerImage = docker.build("${RegistryName}:v${BUILD_NUMBER}",".")
+                }
+            }
+        }
+        stage('Publish Image to ECR'){
+            steps{
+                script{
+                    docker.withRegistry("${RegistryURL}","${AWScreds}"){
+                    dockerImage.push("v${BUILD_NUMBER}")
+                    dockerImage.push('latest')
+                    }
+                }
+            }
+        }
+        stage('Remove unused docker images'){
+            steps{
+                sh ' docker rmi "${RegistryName}:v${BUILD_NUMBER}" '
+            }
+        }
+        stage('Deploy to ECS'){
+            steps{
+                withAWS(credentials: 'aws-accesskey', region: 'us-east-1') {
+                sh 'aws ecs update-service --cluster ${clustername} --service ${servicename} --force-new-deployment'
+            }
+            }
+        }
+
+    }
+    }
+
